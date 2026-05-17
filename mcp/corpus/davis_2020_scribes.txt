@@ -1,0 +1,10 @@
+Title: How many glyphs and how many scribes? Digital paleography and the Voynich Manuscript
+Author: Lisa Fagin Davis
+Year: 2020
+Source: Manuscript Studies, Vol 5, No 2 (paraphrased excerpt for prototype use)
+
+The Voynich Manuscript (Yale University, Beinecke Rare Book and Manuscript Library MS 408) has long been thought to be the work of a single scribe writing in a unique script. The application of digital paleographical methods makes it possible to demonstrate, however, that five scribes using the same script worked on the manuscript. The script itself was developed for the express purpose of writing the Voynich Manuscript.
+
+The identification of multiple scribal hands has substantial implications for our understanding of the manuscript's production. If the script was created specifically for this codex and was used by a small team of cooperating scribes, the project required significant coordination. The five scribes can be distinguished by recurrent features in letter formation, spacing, and pen ductus. Scribe 1 is responsible for the bulk of Quires 1 through 3 and parts of Quire 15. Scribe 2 appears in Quire 13, the balneological section, and contributes the first twelve lines of folio 115r. Scribe 3 is identifiable in portions of Quires 16 and 17. Scribe 4 is the dominant hand in Quires 9 through 12, the zodiacal section. Scribe 5 appears in a more limited capacity, contributing to the bifolium mixing observed in Quires 4 through 7.
+
+The cooperative nature of the production challenges earlier hypotheses that the manuscript represents the idiosyncratic output of a single individual. It is consistent with a workshop or scholarly community context, though the specific identity and location of this community remain undetermined.

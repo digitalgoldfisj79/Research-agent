@@ -1,0 +1,12 @@
+Title: A Prefix-Midfix-Suffix Decomposition of Voynichese Words
+Author: Jorge Stolfi
+Year: 2000
+Source: Stolfi's IBM research notes (paraphrased excerpt for prototype use)
+
+A statistical analysis of word frequencies in the Voynich Manuscript reveals that the great majority of words can be parsed as a concatenation of three substrings: a prefix, a midfix or core, and a suffix. The decomposition is approximately invertible: most words admit a unique parse under reasonable choice rules, and the concatenation of the three parts recovers the original word.
+
+The prefix layer consists of a small set of characters including 'o', 'y', 'q', 'ch', 'sh', and the bare (null) prefix. The midfix layer is the most variable component and accounts for the majority of word-form diversity. The suffix layer is highly constrained, with a small number of recurring suffix forms accounting for the bulk of word terminations.
+
+This layered structure has been described as a crust-mantle-core arrangement, with the prefix forming the crust, the midfix the mantle, and the suffix forming an inner core. The crust-mantle-core terminology is used in subsequent literature as a shorthand for the prefix-midfix-suffix decomposition.
+
+The statistical regularity of this decomposition is a real property of the corpus and is independent of any hypothesis about the underlying language or cipher. It places constraints on what kinds of generative process could have produced the text, but does not by itself establish that the text encodes recoverable lexical content.

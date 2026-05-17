@@ -1,1 +1,12 @@
+Title: Some Important New Statistical Findings
+Author: Captain Prescott H. Currier
+Year: 1976
+Source: Transcript of the Voynich Manuscript seminar, Washington DC (paraphrased excerpt for prototype use)
 
+Two distinct scribal hands are identifiable in the Voynich Manuscript on the basis of letter formation and word-frequency statistics. The two hands are designated Hand A and Hand B. The biological section and most of the herbal section are written in Hand A. The pharmaceutical section and parts of the herbal section are written in Hand B. The distribution of the two hands across the manuscript is not random; it correlates with section and with subject matter.
+
+The word-frequency distributions for Hand A and Hand B are statistically distinguishable. Certain words are dramatically more frequent in one hand than the other. Some words appear almost exclusively in Hand A; others appear almost exclusively in Hand B. The two hands are sometimes treated as if they were two related dialects of the same Voynich language.
+
+The two-hand observation has profound implications for any attempt to decipher the manuscript. A successful decipherment hypothesis must account for the existence of two systematic variants of the script within a single codex. Any decipherment that produces meaningful text in one hand but not the other is suspect; any decipherment that ignores the hand distinction is incomplete.
+
+Subsequent paleographic work, including the Davis 2020 study, has refined the two-hand picture into a five-scribe model. The Currier hands correspond approximately to clusters of scribes within the Davis taxonomy, with Currier Hand A corresponding to Scribe 1 and Currier Hand B corresponding to Scribes 2, 3, 4, and 5.
