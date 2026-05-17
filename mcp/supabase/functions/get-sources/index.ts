@@ -18,27 +18,66 @@ Deno.serve(async (req: Request) => {
 
     const reqUrl = new URL(req.url);
     const sourceId = reqUrl.searchParams.get("source_id");
+    const paraIndex = reqUrl.searchParams.get("paragraph_index");
 
-    if (sourceId) {
-      const { data, error } = await supabase
-        .from("sources")
-        .select("source_id, title, source_url, source_type, fetched_at, sha256, license, word_count")
-        .eq("source_id", sourceId)
-        .maybeSingle();
-      if (error) throw error;
-      return new Response(JSON.stringify(data ?? null), {
+    if (!sourceId) {
+      return new Response(JSON.stringify({ error: "source_id required" }), {
+        status: 400,
         headers: { ...CORS, "Content-Type": "application/json" },
       });
     }
 
-    const { data, error } = await supabase
+    const { data: source, error: sErr } = await supabase
       .from("sources")
-      .select("source_id, title, source_url, source_type, fetched_at, word_count")
-      .eq("source_type", "url_ingest")
-      .order("source_id");
-    if (error) throw error;
+      .select("source_id, title, source_url, source_type, fetched_at, sha256, license, word_count")
+      .eq("source_id", sourceId)
+      .maybeSingle();
+    if (sErr) throw sErr;
+    if (!source) {
+      return new Response(JSON.stringify({ error: `unknown source: ${sourceId}` }), {
+        status: 404,
+        headers: { ...CORS, "Content-Type": "application/json" },
+      });
+    }
 
-    return new Response(JSON.stringify({ sources: data ?? [], count: (data ?? []).length }), {
+    if (paraIndex !== null) {
+      const idx = parseInt(paraIndex, 10);
+      if (Number.isNaN(idx) || idx < 0) {
+        return new Response(JSON.stringify({ error: "paragraph_index must be a non-negative integer" }), {
+          status: 400,
+          headers: { ...CORS, "Content-Type": "application/json" },
+        });
+      }
+      const { data: para, error: pErr } = await supabase
+        .from("source_passages")
+        .select("source_id, paragraph_index, text")
+        .eq("source_id", sourceId)
+        .eq("paragraph_index", idx)
+        .maybeSingle();
+      if (pErr) throw pErr;
+      if (!para) {
+        const { count } = await supabase
+          .from("source_passages")
+          .select("*", { count: "exact", head: true })
+          .eq("source_id", sourceId);
+        return new Response(
+          JSON.stringify({ error: `paragraph_index out of range (have ${count ?? 0} paragraphs)` }),
+          { status: 404, headers: { ...CORS, "Content-Type": "application/json" } },
+        );
+      }
+      return new Response(JSON.stringify({ source, passage: para }), {
+        headers: { ...CORS, "Content-Type": "application/json" },
+      });
+    }
+
+    const { data: paras, error: pErr } = await supabase
+      .from("source_passages")
+      .select("source_id, paragraph_index, text")
+      .eq("source_id", sourceId)
+      .order("paragraph_index");
+    if (pErr) throw pErr;
+
+    return new Response(JSON.stringify({ source, passages: paras ?? [], count: (paras ?? []).length }), {
       headers: { ...CORS, "Content-Type": "application/json" },
     });
   } catch (e) {
