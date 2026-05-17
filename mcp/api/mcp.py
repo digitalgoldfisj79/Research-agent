@@ -355,6 +355,27 @@ if REQUIRED_KEY:
     app.add_middleware(APIKeyMiddleware)
 
 
+# ---------- TrustedHost middleware patch ----------
+#
+# FastMCP's streamable_http_app() installs starlette TrustedHostMiddleware
+# with localhost-only defaults, which is appropriate for stdio but
+# rejects every request when deployed behind a public hostname (Vercel,
+# Cloudflare etc) with a 421 "Invalid Host header". Vercel handles
+# routing/protection at the edge; trusting hosts at the app layer adds
+# no real security in this deployment. Strip it out.
+
+try:
+    from starlette.middleware.trustedhost import TrustedHostMiddleware
+    app.user_middleware = [
+        m for m in app.user_middleware
+        if getattr(m, "cls", None) is not TrustedHostMiddleware
+    ]
+    # Force the middleware stack to be rebuilt on next request
+    app.middleware_stack = None
+except Exception as _e:
+    print(f"[startup] warning: could not patch TrustedHostMiddleware: {_e}", file=sys.stderr)
+
+
 # ---------- Health check ----------
 
 from starlette.responses import JSONResponse
