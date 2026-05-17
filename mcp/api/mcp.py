@@ -1,19 +1,26 @@
 """
 api/mcp.py — Vercel serverless ASGI handler for the citation-verifier MCP.
 
-Vercel's Python runtime detects a top-level `app` variable that is an
-ASGI application and routes HTTP requests to it. The route is configured
-in vercel.json to forward /mcp to this handler.
+This server is a thin proxy + verification layer over the Supabase-backed
+citation ledger. Sources live in Supabase, not in this deployment.
 
-The MCP server speaks the streamable-HTTP transport, which is the
-remote-friendly variant of MCP (vs stdio which only works locally).
+Architecture:
+  - search_sources  → calls Supabase `search-passages` edge function
+                      (semantic search via gte-small embeddings)
+  - list_sources    → calls Supabase `get-sources` edge function
+  - cite_passage    → calls Supabase `get-passage` edge function
+  - source_status   → calls Supabase `get-sources` (single-source mode)
+  - verify_quotation→ fetches passages via `get-passage` then fuzzy-matches
+                      locally using rapidfuzz
+
+The verification step deliberately runs server-side here so external
+clients can't bypass it. All Supabase edge functions called are
+CORS-public and read-only.
 
 Cold start cost:
-  - Importing mcp + rapidfuzz: ~200ms
-  - Loading the bundled corpus: ~50ms for 10 sources
+  - Importing mcp + rapidfuzz + httpx: ~300ms
+  - No corpus loading (data lives in Supabase)
   - Total first-request latency: ~300-500ms typically
-
-Subsequent requests on the same warm container are fast.
 """
 
 from __future__ import annotations
@@ -22,78 +29,32 @@ import json
 import os
 import re
 import sys
-from pathlib import Path
+from urllib.parse import urlencode
 
+import httpx
 from rapidfuzz import fuzz
 from mcp.server.fastmcp import FastMCP
 
 
-# ---------- Corpus loading ----------
-# In a serverless deployment we read corpus files from the deployment
-# package. The directory layout is preserved from the local prototype:
-#   corpus/                  (manually-curated)
-#   corpus_cache/<host>/     (URL-ingested)
+# ---------- Supabase configuration ----------
 
-# When running on Vercel, the project root is the cwd. When running
-# locally with `vercel dev`, same thing. Path resolution works either way
-# as long as we anchor on this file's location.
-HANDLER_DIR = Path(__file__).resolve().parent
-ROOT = HANDLER_DIR.parent
-CURATED_DIR = ROOT / "corpus"
-CACHE_DIR = ROOT / "corpus_cache"
+SUPABASE_URL = os.environ.get(
+    "SUPABASE_URL",
+    "https://ymaqlcfjmdwncdbjprmw.supabase.co",
+)
+SEARCH_PASSAGES_URL = f"{SUPABASE_URL}/functions/v1/search-passages"
+GET_SOURCES_URL = f"{SUPABASE_URL}/functions/v1/get-sources"
+GET_PASSAGE_URL = f"{SUPABASE_URL}/functions/v1/get-passage"
 
-CORPUS: dict[str, dict] = {}
+# Shared httpx client. Created lazily on first use to keep cold starts fast.
+_http: httpx.Client | None = None
 
 
-def _load_curated() -> None:
-    if not CURATED_DIR.exists():
-        return
-    for p in sorted(CURATED_DIR.glob("*.txt")):
-        text = p.read_text(encoding="utf-8")
-        CORPUS[p.stem] = {
-            "text": text,
-            "meta": {"source_type": "curated", "path": str(p.relative_to(ROOT))},
-        }
-
-
-def _load_cache() -> None:
-    if not CACHE_DIR.exists():
-        return
-    for host_dir in sorted(CACHE_DIR.iterdir()):
-        if not host_dir.is_dir():
-            continue
-        manifest_path = host_dir / "manifest.json"
-        if not manifest_path.exists():
-            continue
-        try:
-            manifest = json.loads(manifest_path.read_text())
-        except Exception as e:
-            print(f"[startup] could not parse {manifest_path}: {e}", file=sys.stderr)
-            continue
-        for url, entry in manifest.get("entries", {}).items():
-            slug = entry["slug"]
-            text_path = host_dir / f"{slug}.txt"
-            if not text_path.exists():
-                continue
-            text = text_path.read_text(encoding="utf-8")
-            CORPUS[entry["source_id"]] = {
-                "text": text,
-                "meta": {
-                    "source_type": "url_ingest",
-                    "url": url,
-                    "title": entry.get("title", ""),
-                    "fetched_at": entry.get("fetched_at"),
-                    "sha256": entry.get("sha256"),
-                    "drift_detected_at": entry.get("drift_detected_at"),
-                    "word_count": entry.get("word_count", 0),
-                },
-            }
-
-
-_load_curated()
-_load_cache()
-
-print(f"[startup] Loaded {len(CORPUS)} sources", file=sys.stderr)
+def _client() -> httpx.Client:
+    global _http
+    if _http is None:
+        _http = httpx.Client(timeout=20.0)
+    return _http
 
 
 # ---------- MCP server ----------
@@ -102,201 +63,276 @@ mcp = FastMCP("citation-verifier")
 
 
 @mcp.tool()
-def list_sources() -> list[dict]:
-    """List all available primary sources (curated + URL-ingested).
+def list_sources(limit: int = 50, offset: int = 0) -> dict:
+    """List all available primary sources in the citation ledger.
 
-    Returns source_id, source_type (curated/url_ingest), length, and either
-    a preview (curated) or title+url (url_ingest).
+    Returns source_id, source_type, title, source_url, and word_count for
+    each source. The corpus lives in Supabase; this call fetches the
+    current state at request time.
+
+    Args:
+        limit: maximum number of sources to return (default 50, max 500).
+        offset: pagination offset (default 0).
     """
-    out = []
-    for sid, rec in CORPUS.items():
-        m = rec["meta"]
-        entry = {
-            "source_id": sid,
-            "source_type": m["source_type"],
-            "length_chars": len(rec["text"]),
-        }
-        if m["source_type"] == "url_ingest":
-            entry["title"] = m.get("title", "")
-            entry["url"] = m.get("url", "")
-        else:
-            entry["preview"] = rec["text"][:200].replace("\n", " ")
-        out.append(entry)
-    return out
+    limit = max(1, min(int(limit), 500))
+    offset = max(0, int(offset))
+    try:
+        r = _client().get(GET_SOURCES_URL)
+        r.raise_for_status()
+        body = r.json()
+        sources = body.get("sources", [])
+        total = body.get("count", len(sources))
+        page = sources[offset:offset + limit]
+        return {"count": total, "returned": len(page), "offset": offset, "sources": page}
+    except Exception as e:
+        return {"error": f"failed to list sources: {e}"}
 
 
 @mcp.tool()
-def search_sources(query: str, max_results: int = 5) -> list[dict]:
-    """Search for paragraphs across all sources that contain ALL query terms.
+def search_sources(query: str, max_results: int = 5,
+                   similarity_threshold: float = 0.5) -> list[dict]:
+    """Search the citation ledger for passages relevant to the query.
 
-    Use this to find relevant passages before quoting.
+    Uses semantic search (gte-small embeddings) against all 4000+ embedded
+    passages. Use this to find relevant passages before quoting.
+
+    Args:
+        query: natural language search query.
+        max_results: maximum number of passages to return (1-20).
+        similarity_threshold: minimum cosine similarity (0.0-1.0, default 0.5).
+
+    Returns a list of {source_id, paragraph_index, text, similarity} dicts,
+    ordered by similarity descending.
     """
-    max_results = min(max(int(max_results), 1), 20)
-    terms = [t.lower() for t in query.split() if t.strip()]
-    if not terms:
+    max_results = max(1, min(int(max_results), 20))
+    if not (query or "").strip():
         return []
+    try:
+        r = _client().post(
+            SEARCH_PASSAGES_URL,
+            json={
+                "query": query,
+                "match_count": max_results,
+                "similarity_threshold": float(similarity_threshold),
+            },
+        )
+        r.raise_for_status()
+        body = r.json()
+        return [
+            {
+                "source_id": p["source_id"],
+                "paragraph_index": p["paragraph_index"],
+                "text": p["text"][:1000],
+                "similarity": round(float(p["similarity"]), 3),
+            }
+            for p in body.get("results", [])
+        ]
+    except Exception as e:
+        return [{"error": f"search failed: {e}"}]
 
-    results = []
-    for sid, rec in CORPUS.items():
-        text = rec["text"]
-        paras = [p.strip() for p in re.split(r"\n\s*\n", text) if p.strip()]
-        for i, para in enumerate(paras):
-            lower = para.lower()
-            if all(t in lower for t in terms):
-                results.append({
-                    "source_id": sid,
-                    "paragraph_index": i,
-                    "text": para[:1000],
-                })
-                if len(results) >= max_results:
-                    return results
-    return results
+
+def _fetch_passage(source_id: str, paragraph_index: int) -> dict | None:
+    """Fetch a specific passage from Supabase. Returns None if not found."""
+    qs = urlencode({"source_id": source_id, "paragraph_index": int(paragraph_index)})
+    r = _client().get(f"{GET_PASSAGE_URL}?{qs}")
+    if r.status_code == 404:
+        return None
+    r.raise_for_status()
+    return r.json()
+
+
+def _fetch_source(source_id: str) -> dict | None:
+    """Fetch source metadata. Returns None if not found."""
+    qs = urlencode({"source_id": source_id})
+    r = _client().get(f"{GET_SOURCES_URL}?{qs}")
+    r.raise_for_status()
+    data = r.json()
+    return data if data else None
+
+
+def _fetch_all_passages(source_id: str) -> list[dict]:
+    """Fetch every paragraph for a source. May be slow for large sources."""
+    qs = urlencode({"source_id": source_id})
+    r = _client().get(f"{GET_PASSAGE_URL}?{qs}")
+    r.raise_for_status()
+    body = r.json()
+    return body.get("passages", []) if "passages" in body else []
 
 
 @mcp.tool()
-def verify_quotation(quoted_text: str, source_id: str) -> dict:
+def verify_quotation(quoted_text: str, source_id: str,
+                     paragraph_index: int | None = None) -> dict:
     """Verify whether the given text appears in the named source.
 
     USE THIS BEFORE INCLUDING ANY DIRECT QUOTATION IN YOUR OUTPUT.
 
-    Returns: verified (bool), match_type, similarity (0-100),
-    closest_match (str), message (str).
-    """
-    if source_id not in CORPUS:
-        return {
-            "verified": False,
-            "match_type": "unknown_source",
-            "similarity": 0,
-            "closest_match": None,
-            "message": f"No source with id {source_id!r}. Available: {sorted(CORPUS.keys())[:20]}",
-        }
+    If paragraph_index is given, verifies against that single paragraph
+    (fast). Otherwise verifies against ALL paragraphs in the source
+    (slower for large sources but more thorough).
 
-    text = CORPUS[source_id]["text"]
-    quoted = quoted_text.strip()
+    Returns:
+        verified (bool): True only if the quotation is a near-exact match.
+        match_type (str): "exact", "fuzzy", "no_match", or "unknown_source".
+        similarity (float): 0-100, rapidfuzz score.
+        closest_match (str): nearest matching window in the source.
+        paragraph_index (int | null): location of best match.
+        message (str): human-readable explanation.
+    """
+    quoted = (quoted_text or "").strip()
     if not quoted:
         return {
             "verified": False, "match_type": "no_match", "similarity": 0,
-            "closest_match": None, "message": "Empty quotation provided.",
+            "closest_match": None, "paragraph_index": None,
+            "message": "Empty quotation provided.",
         }
 
-    if quoted in text:
+    try:
+        if paragraph_index is not None:
+            passage_resp = _fetch_passage(source_id, int(paragraph_index))
+            if not passage_resp:
+                return {
+                    "verified": False, "match_type": "unknown_source",
+                    "similarity": 0, "closest_match": None,
+                    "paragraph_index": None,
+                    "message": f"No passage at {source_id!r} paragraph {paragraph_index}.",
+                }
+            passages = [passage_resp["passage"]]
+        else:
+            passages = _fetch_all_passages(source_id)
+            if not passages:
+                return {
+                    "verified": False, "match_type": "unknown_source",
+                    "similarity": 0, "closest_match": None,
+                    "paragraph_index": None,
+                    "message": f"No source with id {source_id!r}.",
+                }
+    except Exception as e:
         return {
-            "verified": True, "match_type": "exact", "similarity": 100,
-            "closest_match": quoted, "message": "Exact match found in source.",
+            "verified": False, "match_type": "error", "similarity": 0,
+            "closest_match": None, "paragraph_index": None,
+            "message": f"Failed to fetch source: {e}",
         }
 
-    qlen = len(quoted)
-    step = max(1, qlen // 6)
+    # Exact-match check first (cheap)
+    for p in passages:
+        if quoted in p["text"]:
+            return {
+                "verified": True, "match_type": "exact", "similarity": 100.0,
+                "closest_match": quoted, "paragraph_index": p["paragraph_index"],
+                "message": "Exact match found in source.",
+            }
+
+    # Fuzzy match across all paragraphs
     best_score = 0.0
     best_window = ""
-    for i in range(0, max(1, len(text) - qlen + 1), step):
-        window = text[i:i + qlen]
-        score = fuzz.ratio(quoted.lower(), window.lower())
-        if score > best_score:
-            best_score = score
-            best_window = window
-        if best_score == 100:
-            break
+    best_para = None
+    qlen = len(quoted)
+    qlower = quoted.lower()
 
-    partial = fuzz.partial_ratio(quoted.lower(), text.lower())
-    final_score = max(best_score, partial)
+    for p in passages:
+        text = p["text"]
+        partial = fuzz.partial_ratio(qlower, text.lower())
+        if partial > best_score:
+            best_score = partial
+            best_para = p["paragraph_index"]
+            # Find the actual window for closest_match
+            step = max(1, qlen // 6)
+            local_best_score = 0.0
+            local_best_window = text[:qlen] if len(text) >= qlen else text
+            for i in range(0, max(1, len(text) - qlen + 1), step):
+                window = text[i:i + qlen]
+                s = fuzz.ratio(qlower, window.lower())
+                if s > local_best_score:
+                    local_best_score = s
+                    local_best_window = window
+                if local_best_score == 100:
+                    break
+            best_window = local_best_window
 
-    if partial > best_score:
-        for i in range(0, max(1, len(text) - qlen + 1)):
-            window = text[i:i + qlen]
-            s = fuzz.ratio(quoted.lower(), window.lower())
-            if s >= partial - 1:
-                best_window = window
-                break
+    final_score = best_score
 
     if final_score >= 95:
         return {
             "verified": True, "match_type": "fuzzy",
-            "similarity": float(final_score), "closest_match": best_window,
+            "similarity": float(final_score),
+            "closest_match": best_window,
+            "paragraph_index": best_para,
             "message": f"Near-exact match ({final_score:.0f}%). Use closest_match wording for verbatim citation.",
         }
     elif final_score >= 75:
         return {
             "verified": False, "match_type": "fuzzy",
-            "similarity": float(final_score), "closest_match": best_window,
+            "similarity": float(final_score),
+            "closest_match": best_window,
+            "paragraph_index": best_para,
             "message": f"Approximate but not verified ({final_score:.0f}%). Use paraphrase framing or replace with closest_match wording.",
         }
     else:
         return {
             "verified": False, "match_type": "no_match",
             "similarity": float(final_score),
-            "closest_match": best_window[:300] if best_window else None,
+            "closest_match": (best_window[:300] if best_window else None),
+            "paragraph_index": best_para,
             "message": f"Quotation NOT found in source {source_id!r} (best similarity {final_score:.0f}%). Do not present this as a direct quote.",
         }
 
 
-def _header_field(text: str, field: str) -> str | None:
-    m = re.search(rf"^{re.escape(field)}:\s*(.+)$", text, re.MULTILINE | re.IGNORECASE)
-    return m.group(1).strip() if m else None
-
-
 @mcp.tool()
 def cite_passage(source_id: str, paragraph_index: int = 0) -> dict:
-    """Return the canonical text of a specific paragraph + a citation string."""
-    if source_id not in CORPUS:
-        return {"error": f"unknown source: {source_id}"}
-    rec = CORPUS[source_id]
-    text = rec["text"]
-    meta = rec["meta"]
+    """Return the canonical text of a specific paragraph plus a citation string.
 
-    paras = [p.strip() for p in re.split(r"\n\s*\n", text) if p.strip()]
-    if paragraph_index < 0 or paragraph_index >= len(paras):
-        return {"error": f"paragraph_index out of range (0..{len(paras)-1})"}
+    Args:
+        source_id: the source identifier (from list_sources or search_sources).
+        paragraph_index: 0-based paragraph index within the source.
 
-    para_text = paras[paragraph_index]
+    Returns dict with: source_id, paragraph_index, text, citation, source_url, title.
+    """
+    try:
+        passage_resp = _fetch_passage(source_id, int(paragraph_index))
+    except Exception as e:
+        return {"error": f"failed to fetch passage: {e}"}
+    if not passage_resp:
+        return {"error": f"no passage at {source_id!r} paragraph {paragraph_index}"}
 
-    if meta["source_type"] == "url_ingest":
-        title = meta.get("title") or _header_field(text, "Title") or "(no title)"
-        url = meta.get("url") or _header_field(text, "Source URL") or ""
-        citation = f'"{title}". {url}. [source_id={source_id}, para={paragraph_index}]'
-        if meta.get("drift_detected_at"):
-            citation += f' [DRIFT DETECTED at {meta["drift_detected_at"]}; re-verify]'
-    else:
-        author = _header_field(text, "Author") or "(unknown)"
-        year = _header_field(text, "Year") or "n.d."
-        title = _header_field(text, "Title") or "(no title)"
-        citation = f"{author} ({year}). {title}. [source_id={source_id}, para={paragraph_index}]"
+    src = passage_resp["source"]
+    pas = passage_resp["passage"]
+    title = src.get("title") or "(no title)"
+    url = src.get("source_url") or ""
+
+    citation = (
+        f'"{title}". {url}. [source_id={source_id}, para={paragraph_index}]'
+        if src.get("source_type") == "url_ingest"
+        else f"{title}. [source_id={source_id}, para={paragraph_index}]"
+    )
 
     return {
         "source_id": source_id,
         "paragraph_index": paragraph_index,
-        "text": para_text,
+        "text": pas["text"],
         "citation": citation,
+        "source_url": url,
+        "title": title,
     }
 
 
 @mcp.tool()
 def source_status(source_id: str) -> dict:
-    """Return metadata for a source: type, fetch time, drift status."""
-    if source_id not in CORPUS:
+    """Return metadata for a single source: type, URL, title, fetch time, word count, sha256."""
+    try:
+        src = _fetch_source(source_id)
+    except Exception as e:
+        return {"error": f"failed to fetch source: {e}"}
+    if not src:
         return {"error": f"unknown source: {source_id}"}
-    return {"source_id": source_id, **CORPUS[source_id]["meta"]}
+    return src
 
 
 # ---------- ASGI app (Vercel entry point) ----------
-#
-# Vercel's Python runtime detects `app` as an ASGI application and routes
-# requests to it. The MCP streamable-HTTP transport mounts on /mcp by
-# default in the Starlette app it returns.
 
 app = mcp.streamable_http_app()
 
 
 # ---------- Optional API key gate ----------
-#
-# If the CITATION_MCP_API_KEY env var is set, require a matching
-# Authorization: Bearer <key> header on every request. Without an
-# API key set, the endpoint is open — fine for prototype, not for
-# production.
-#
-# This wraps the ASGI app rather than relying on FastMCP's auth
-# (which targets OAuth flows; for a personal/team deployment a
-# shared secret is simpler).
 
 REQUIRED_KEY = os.environ.get("CITATION_MCP_API_KEY")
 
@@ -306,7 +342,6 @@ if REQUIRED_KEY:
 
     class APIKeyMiddleware(BaseHTTPMiddleware):
         async def dispatch(self, request, call_next):
-            # health check is open
             if request.url.path in ("/", "/health"):
                 return await call_next(request)
             auth = request.headers.get("authorization", "")
@@ -321,24 +356,30 @@ if REQUIRED_KEY:
 
 
 # ---------- Health check ----------
-#
-# Vercel pings the root URL after deploy. Give it a useful response so
-# we can verify the deployment from a browser.
 
 from starlette.responses import JSONResponse
 from starlette.routing import Route
 
 
 async def health(request):
+    sources_count: int | str = "unknown"
+    try:
+        r = _client().get(GET_SOURCES_URL, timeout=10.0)
+        if r.status_code == 200:
+            sources_count = r.json().get("count", "unknown")
+    except Exception:
+        sources_count = "supabase-unreachable"
+
     return JSONResponse({
         "service": "citation-verifier-mcp",
         "status": "ok",
-        "sources_loaded": len(CORPUS),
+        "sources_loaded": sources_count,
+        "backend": "supabase",
+        "supabase_url": SUPABASE_URL,
         "mcp_endpoint": "/mcp",
         "auth": "bearer_token" if REQUIRED_KEY else "open",
     })
 
 
-# Inject the health route into the existing Starlette app
 app.routes.insert(0, Route("/", health))
 app.routes.insert(1, Route("/health", health))
