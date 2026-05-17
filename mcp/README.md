@@ -4,7 +4,7 @@ A Model Context Protocol server that verifies quotations against a corpus of sou
 
 This is the verification backend for [Research-agent](https://github.com/digitalgoldfisj79/Research-agent). When a researcher submits a claim with cited quotations, the application calls this service to confirm that each quoted passage actually appears in the named source.
 
-## Endpoint
+## Endpoint .,
 
 After Vercel deploy, the live endpoint is at `https://<project>.vercel.app/mcp`. A health check is available at `/health`.
 
