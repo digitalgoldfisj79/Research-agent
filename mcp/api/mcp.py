@@ -34,6 +34,7 @@ from urllib.parse import urlencode
 import httpx
 from rapidfuzz import fuzz
 from mcp.server.fastmcp import FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
 
 
 # ---------- Supabase configuration ----------
@@ -59,7 +60,19 @@ def _client() -> httpx.Client:
 
 # ---------- MCP server ----------
 
-mcp = FastMCP("citation-verifier")
+# FastMCP enables DNS rebinding protection by default in its
+# StreamableHTTPSessionManager, which rejects requests whose Host header
+# isn't in `allowed_hosts`. That protection is designed for stdio /
+# localhost servers; behind a public HTTPS endpoint (Vercel here) the
+# attack model doesn't apply and the check just blocks every request
+# with a 421 "Invalid Host header". Disable it explicitly.
+
+mcp = FastMCP(
+    "citation-verifier",
+    transport_security=TransportSecuritySettings(
+        enable_dns_rebinding_protection=False,
+    ),
+)
 
 
 @mcp.tool()
