@@ -1,0 +1,32 @@
+{
+  "claim_id": "vms-2026-0004",
+  "submitted_at": "2026-05-17T20:45:00Z",
+  "submitted_by": "digitalgoldfisj79",
+  "claim_text": "The VMS Pisces-first zodiac ordering is most parsimoniously explained as the combined product of the entering-sign convention (which makes Pisces = March) and the More Veneto calendar style (which makes March the first month of the year). This combination is specific to Venetian-territory calendars within the 1404-1438 production window and rules out Milanese, Pavian, German Imperial, and most Tuscan calendrical contexts. Padua becomes a viable production context from 22 November 1405 onward, when it adopts the More Veneto under Venetian rule.",
+  "category": "calendar",
+  "supporting_evidence": [
+    {
+      "source_id": "voynich_nu_quires_overview",
+      "passage_reference": "VMS zodiac sequence starting with Pisces at f70v2",
+      "verification_status": "pending"
+    },
+    {
+      "source_id": "cappelli_1906_cronologia",
+      "passage_reference": "Italian calendar styles excluding Milan, Pavia, Florence, Siena, Pisa from 1 March new year",
+      "verification_status": "pending"
+    },
+    {
+      "source_id": "grotefend_zeitrechnung",
+      "passage_reference": "German Imperial calendar used Christmas style (Weihnachtsstil), December 25 new year; no Southern German diocese used March-starting year in the 14th-15th century",
+      "verification_status": "pending"
+    }
+  ],
+  "falsifier": "Evidence that the More Veneto inference is wrong (per the falsifier of vms-2026-0003), OR evidence that the entering-sign convention does not apply (per the falsifier of vms-2026-0002), OR demonstration that Pisces-first ordering existed in a tradition outside More Veneto territories without requiring either convention, would weaken or collapse this synthesis. The synthesis remains a constraint on context rather than a positive identification of place of production.",
+  "depends_on": ["vms-2026-0001", "vms-2026-0002", "vms-2026-0003"],
+  "status": "draft",
+  "retracted": false,
+  "retraction_reason": null,
+  "retracted_at": null,
+  "tags": ["synthesis", "production-context", "venetian-territory"],
+  "discussion_notes": "Synthesis claim. The dependency chain (vms-2026-0001 -> 0002, 0003 -> 0004) demonstrates the ledger's dependency-graph feature: if any of the foundational claims is retracted, this synthesis is automatically flagged. The synthesis is a constraint, not a proof: it eliminates several candidate production geographies but does not uniquely identify Venice or Padua. Additional positive evidence (paleographic, codicological, lexical) would be required to move from constraint to identification."
+}

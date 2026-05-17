@@ -1,1 +1,27 @@
-
+{
+  "claim_id": "vms-2026-0001",
+  "submitted_at": "2026-05-17T20:00:00Z",
+  "submitted_by": "digitalgoldfisj79",
+  "claim_text": "The Voynich Manuscript zodiac sequence begins with Pisces (f70v2) and proceeds through Aries Dark (f70v1), Aries Light (f71r), Taurus Light (f71v), Taurus Dark (f72r1), Gemini (f72r2), Cancer (f72r3), Leo (f72v3), Virgo (f72v2), Libra (f72v1), Scorpio (f73r), Sagittarius (f73v), with Capricorn and Aquarius lost. This Pisces-first ordering is anomalous for every known astrological tradition, all of which begin the zodiac with Aries at the vernal equinox.",
+  "category": "zodiac",
+  "supporting_evidence": [
+    {
+      "source_id": "voynich_nu_quires_overview",
+      "passage_reference": "Quires Q9-Q12 zodiac section folio sequence",
+      "verification_status": "pending"
+    },
+    {
+      "source_id": "davis_2020_scribes",
+      "passage_reference": "Scribe 4 attribution of Quires 9-12 zodiacal section",
+      "verification_status": "pending"
+    }
+  ],
+  "falsifier": "Identification of any pre-1438 astrological or computistical tradition that conventionally begins the zodiac display with Pisces rather than Aries would weaken the 'anomaly' framing and would shift the explanatory burden from the zodiac display to the underlying convention. Independent reassignment of f70v2 to Aquarius rather than Pisces would also collapse this claim.",
+  "depends_on": [],
+  "status": "draft",
+  "retracted": false,
+  "retraction_reason": null,
+  "retracted_at": null,
+  "tags": ["pisces-first", "folio-sequence", "anomaly"],
+  "discussion_notes": "Foundational observation. Subsequent claims in the zodiac category explain the Pisces-first ordering via medieval calendrical conventions (vms-2026-0002, vms-2026-0003). The folio sequence is a structural fact about the manuscript; the 'anomaly' framing depends on the cross-tradition comparison being correct."
+}

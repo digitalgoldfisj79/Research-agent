@@ -1,0 +1,32 @@
+{
+  "claim_id": "vms-2026-0002",
+  "submitted_at": "2026-05-17T20:15:00Z",
+  "submitted_by": "digitalgoldfisj79",
+  "claim_text": "The Pisces-first ordering is consistent with the medieval 'entering sign' calendrical convention, which assigned each calendar month the zodiac sign the Sun is in on the first of that month. Under this convention, Pisces corresponds to March because the Sun enters Pisces approximately 19 February and remains until approximately 20 March. Manuscripts using this convention place Pisces at the head of the zodiac when the year is displayed in calendar order.",
+  "category": "calendar",
+  "supporting_evidence": [
+    {
+      "source_id": "bl_cotton_julius_a_vi",
+      "passage_reference": "Canterbury, 11th century, explicitly labels Pisces as the sign for March",
+      "verification_status": "pending"
+    },
+    {
+      "source_id": "bl_harley_3735",
+      "passage_reference": "Tractatus quadrantis veteris, 1264-1293, tabulates the Sun's position at the beginning of each month starting with March, placing Pisces first",
+      "verification_status": "pending"
+    },
+    {
+      "source_id": "byrhtferth_st_johns_17",
+      "passage_reference": "Computistical diagrams, early 11th century, show similar Pisces-first calendrical structure",
+      "verification_status": "pending"
+    }
+  ],
+  "falsifier": "Evidence that the entering-sign convention was not in widespread use in the VMS production window (1404-1438), or evidence that the convention typically placed Aries (rather than Pisces) at March because of vernal-equinox primacy, would weaken this explanation. The convention being attested but rare would also reduce the strength of the inference: the argument depends on it being a recognisable display option for a scribe of the period.",
+  "depends_on": ["vms-2026-0001"],
+  "status": "draft",
+  "retracted": false,
+  "retraction_reason": null,
+  "retracted_at": null,
+  "tags": ["entering-sign", "calendrical-convention", "march-pisces"],
+  "discussion_notes": "First half of the two-convention explanation of the Pisces-first ordering. Provides a documented medieval mechanism by which March = Pisces. Does not yet address why the year would start at March; that is the role of vms-2026-0003 (More Veneto calendar). The cited manuscripts are pre-VMS by centuries, which raises the question of whether the entering-sign convention persisted into the 15th century. Worth investigating further before promoting from draft to verified."
+}

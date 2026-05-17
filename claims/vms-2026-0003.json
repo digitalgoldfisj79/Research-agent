@@ -1,0 +1,32 @@
+{
+  "claim_id": "vms-2026-0003",
+  "submitted_at": "2026-05-17T20:30:00Z",
+  "submitted_by": "digitalgoldfisj79",
+  "claim_text": "Among Italian calendrical styles in use during the VMS production window (1404-1438), only the More Veneto (Venetian) style used a 1 March new year. This convention was used in Venice and its territories, including Padua from 22 November 1405 when Padua passed from Carrara to Venetian rule. Other relevant Italian styles place the new year elsewhere: Florence, Siena, and Pisa at 25 March (Incarnation, stile fiorentino, stile pisano), and Milan, Pavia, and most other Italian cities at 25 December (Nativity).",
+  "category": "calendar",
+  "supporting_evidence": [
+    {
+      "source_id": "cappelli_1906_cronologia",
+      "passage_reference": "Table of Italian calendar styles with city-by-city new year dates",
+      "verification_status": "pending"
+    },
+    {
+      "source_id": "more_veneto_wikipedia",
+      "passage_reference": "Continuing the ancient Roman custom, the Venetian year began on 1 March; the more veneto continued until the fall of the Venetian Republic in 1797",
+      "verification_status": "pending"
+    },
+    {
+      "source_id": "padua_carrara_to_venice_1405",
+      "passage_reference": "Padua transitioned to Venetian rule on 22 November 1405 following the War of Padua 1404-1405",
+      "verification_status": "pending"
+    }
+  ],
+  "falsifier": "Documentation of any non-Venetian Italian city using a 1 March new year during 1404-1438 would weaken the inference from More Veneto specifically. Documentation that any Venetian-aligned territory used a different calendar style would also weaken the inference. Cappelli being demonstrated to be unreliable on the cities in question would require re-grounding the argument on primary archival sources.",
+  "depends_on": ["vms-2026-0001", "vms-2026-0002"],
+  "status": "draft",
+  "retracted": false,
+  "retraction_reason": null,
+  "retracted_at": null,
+  "tags": ["more-veneto", "padua-1405", "italian-calendar-styles"],
+  "discussion_notes": "Combined with vms-2026-0002, this claim provides the two-convention explanation of the VMS Pisces-first ordering: (a) entering-sign assigns Pisces to March, (b) March-first new year displays Pisces at the head. The conjunction is specific to Venetian-territory calendars. The argument constrains the production geography but does not prove Venetian origin: a manuscript produced elsewhere by a scribe trained in or operating under Venetian conventions could also exhibit the pattern. The constraint is therefore on calendrical context rather than physical location."
+}
