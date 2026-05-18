@@ -1,1 +1,19 @@
+name: heartbeat
 
+# Daily ping to the heartbeat edge function to prevent Supabase free-tier
+# 7-day auto-pause. Required secret: SUPABASE_PROJECT_REF (e.g. ymaqlcfjmdwncdbjprmw).
+
+on:
+  schedule:
+    - cron: '0 7 * * *'  # 07:00 UTC daily
+  workflow_dispatch:  # manual trigger
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping heartbeat
+        run: |
+          curl -fSs -m 30 \
+            "https://${{ secrets.SUPABASE_PROJECT_REF }}.supabase.co/functions/v1/heartbeat?source=github_actions" \
+            | head -200
