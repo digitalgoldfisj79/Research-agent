@@ -12,15 +12,12 @@ Architecture:
   - source_status   → calls Supabase `get-sources` (single-source mode)
   - verify_quotation→ fetches passages via `get-passage` then fuzzy-matches
                       locally using rapidfuzz
+  - trace_claim_history → calls Supabase `trace-claim-history` edge function
+                      (LLM historiography with verification gate)
 
 The verification step deliberately runs server-side here so external
 clients can't bypass it. All Supabase edge functions called are
 CORS-public and read-only.
-
-Cold start cost:
-  - Importing mcp + rapidfuzz + httpx: ~300ms
-  - No corpus loading (data lives in Supabase)
-  - Total first-request latency: ~300-500ms typically
 """
 
 from __future__ import annotations
@@ -46,6 +43,7 @@ SUPABASE_URL = os.environ.get(
 SEARCH_PASSAGES_URL = f"{SUPABASE_URL}/functions/v1/search-passages"
 GET_SOURCES_URL = f"{SUPABASE_URL}/functions/v1/get-sources"
 GET_PASSAGE_URL = f"{SUPABASE_URL}/functions/v1/get-passage"
+TRACE_CLAIM_HISTORY_URL = f"{SUPABASE_URL}/functions/v1/trace-claim-history"
 
 # Shared httpx client. Created lazily on first use to keep cold starts fast.
 _http: httpx.Client | None = None
@@ -60,13 +58,6 @@ def _client() -> httpx.Client:
 
 # ---------- MCP server ----------
 
-# FastMCP enables DNS rebinding protection by default in its
-# StreamableHTTPSessionManager, which rejects requests whose Host header
-# isn't in `allowed_hosts`. That protection is designed for stdio /
-# localhost servers; behind a public HTTPS endpoint (Vercel here) the
-# attack model doesn't apply and the check just blocks every request
-# with a 421 "Invalid Host header". Disable it explicitly.
-
 mcp = FastMCP(
     "citation-verifier",
     transport_security=TransportSecuritySettings(
@@ -77,16 +68,7 @@ mcp = FastMCP(
 
 @mcp.tool()
 def list_sources(limit: int = 50, offset: int = 0) -> dict:
-    """List all available primary sources in the citation ledger.
-
-    Returns source_id, source_type, title, source_url, and word_count for
-    each source. The corpus lives in Supabase; this call fetches the
-    current state at request time.
-
-    Args:
-        limit: maximum number of sources to return (default 50, max 500).
-        offset: pagination offset (default 0).
-    """
+    """List all available primary sources in the citation ledger."""
     limit = max(1, min(int(limit), 500))
     offset = max(0, int(offset))
     try:
@@ -104,19 +86,7 @@ def list_sources(limit: int = 50, offset: int = 0) -> dict:
 @mcp.tool()
 def search_sources(query: str, max_results: int = 5,
                    similarity_threshold: float = 0.5) -> list[dict]:
-    """Search the citation ledger for passages relevant to the query.
-
-    Uses semantic search (gte-small embeddings) against all 4000+ embedded
-    passages. Use this to find relevant passages before quoting.
-
-    Args:
-        query: natural language search query.
-        max_results: maximum number of passages to return (1-20).
-        similarity_threshold: minimum cosine similarity (0.0-1.0, default 0.5).
-
-    Returns a list of {source_id, paragraph_index, text, similarity} dicts,
-    ordered by similarity descending.
-    """
+    """Search the citation ledger for passages relevant to the query."""
     max_results = max(1, min(int(max_results), 20))
     if not (query or "").strip():
         return []
@@ -145,7 +115,6 @@ def search_sources(query: str, max_results: int = 5,
 
 
 def _fetch_passage(source_id: str, paragraph_index: int) -> dict | None:
-    """Fetch a specific passage from Supabase. Returns None if not found."""
     qs = urlencode({"source_id": source_id, "paragraph_index": int(paragraph_index)})
     r = _client().get(f"{GET_PASSAGE_URL}?{qs}")
     if r.status_code == 404:
@@ -155,7 +124,6 @@ def _fetch_passage(source_id: str, paragraph_index: int) -> dict | None:
 
 
 def _fetch_source(source_id: str) -> dict | None:
-    """Fetch source metadata. Returns None if not found."""
     qs = urlencode({"source_id": source_id})
     r = _client().get(f"{GET_SOURCES_URL}?{qs}")
     r.raise_for_status()
@@ -164,7 +132,6 @@ def _fetch_source(source_id: str) -> dict | None:
 
 
 def _fetch_all_passages(source_id: str) -> list[dict]:
-    """Fetch every paragraph for a source. May be slow for large sources."""
     qs = urlencode({"source_id": source_id})
     r = _client().get(f"{GET_PASSAGE_URL}?{qs}")
     r.raise_for_status()
@@ -178,18 +145,6 @@ def verify_quotation(quoted_text: str, source_id: str,
     """Verify whether the given text appears in the named source.
 
     USE THIS BEFORE INCLUDING ANY DIRECT QUOTATION IN YOUR OUTPUT.
-
-    If paragraph_index is given, verifies against that single paragraph
-    (fast). Otherwise verifies against ALL paragraphs in the source
-    (slower for large sources but more thorough).
-
-    Returns:
-        verified (bool): True only if the quotation is a near-exact match.
-        match_type (str): "exact", "fuzzy", "no_match", or "unknown_source".
-        similarity (float): 0-100, rapidfuzz score.
-        closest_match (str): nearest matching window in the source.
-        paragraph_index (int | null): location of best match.
-        message (str): human-readable explanation.
     """
     quoted = (quoted_text or "").strip()
     if not quoted:
@@ -226,7 +181,6 @@ def verify_quotation(quoted_text: str, source_id: str,
             "message": f"Failed to fetch source: {e}",
         }
 
-    # Exact-match check first (cheap)
     for p in passages:
         if quoted in p["text"]:
             return {
@@ -235,7 +189,6 @@ def verify_quotation(quoted_text: str, source_id: str,
                 "message": "Exact match found in source.",
             }
 
-    # Fuzzy match across all paragraphs
     best_score = 0.0
     best_window = ""
     best_para = None
@@ -248,7 +201,6 @@ def verify_quotation(quoted_text: str, source_id: str,
         if partial > best_score:
             best_score = partial
             best_para = p["paragraph_index"]
-            # Find the actual window for closest_match
             step = max(1, qlen // 6)
             local_best_score = 0.0
             local_best_window = text[:qlen] if len(text) >= qlen else text
@@ -292,14 +244,7 @@ def verify_quotation(quoted_text: str, source_id: str,
 
 @mcp.tool()
 def cite_passage(source_id: str, paragraph_index: int = 0) -> dict:
-    """Return the canonical text of a specific paragraph plus a citation string.
-
-    Args:
-        source_id: the source identifier (from list_sources or search_sources).
-        paragraph_index: 0-based paragraph index within the source.
-
-    Returns dict with: source_id, paragraph_index, text, citation, source_url, title.
-    """
+    """Return the canonical text of a specific paragraph plus a citation string."""
     try:
         passage_resp = _fetch_passage(source_id, int(paragraph_index))
     except Exception as e:
@@ -340,6 +285,81 @@ def source_status(source_id: str) -> dict:
     return src
 
 
+# ---------- NEW: trace_claim_history ----------
+
+@mcp.tool()
+def trace_claim_history(claim: str, include_passages: bool = False) -> dict:
+    """Trace the historiographic evolution of a claim about the Voynich Manuscript.
+
+    This is a DIFFERENT question shape from search_sources or verify_quotation.
+    Use this tool when the user wants to know HOW A CLAIM HAS BEEN ARGUED
+    THROUGH TIME — who first proposed it, what evidence was presented, how
+    it has evolved, current status — rather than whether the claim is true.
+
+    The tool calls a downstream LLM that synthesises retrieved passages into
+    a chronological historiography. Every assertion the LLM makes is then
+    checked by a verification gate against the retrieved corpus: author names,
+    years, percentages, and supporting-passage indices that can't be confirmed
+    are returned in the `verification.unverified_assertions` array.
+
+    Latency note: this call typically takes 30–45 seconds (measured) because it makes
+    two LLM passes (classify + synthesise) plus the verification scan.
+
+    Args:
+        claim: the claim to trace (min 8 characters). Best results for advocacy
+            claims about origin, authorship, dating, or interpretation.
+            Descriptive/empirical claims will produce earliest_advocacy=null
+            with a caveat.
+        include_passages: if True, include the full chronological_evidence
+            (50-item summary) and retrieved_passages_full (50 full passage
+            texts). Default False keeps the response compact (~10-20 KB).
+            Set True if you need to inspect specific passages cited.
+
+    Returns dict with:
+        retrieval_summary: {total_retrieved, dated_count, undated_count, year_range}
+        historiography:
+            earliest_advocacy: {passage_year, author, verbatim_quote,
+                supporting_passage_index, source_id, caveat} | null
+            evolution_summary: prose tracing claim through time
+            current_status: {label, reasoning, modern_advocates[], modern_rejecters[]}
+                where label ∈ {currently_held, historically_proposed, contested,
+                abandoned, insufficient_corpus}
+            unresolved_historical_disputes: list of disagreements about what
+                historical figures believed
+        integrated_narrative: 1-2 paragraphs of historiographic prose
+        verification:
+            unverified_assertions: list of LLM claims the gate couldn't confirm
+                (with field, status, value, supporting_passage_index)
+            flagged_specifics: years and percentages in narrative, each marked
+                verified_in_corpus or not_in_any_retrieved_passage
+            summary: counts by category
+            filtered_names: forum handles / emails the post-process dropped
+        usage: {total_tokens, retrieved}
+    """
+    claim = (claim or "").strip()
+    if len(claim) < 8:
+        return {"error": "claim required (min 8 chars)"}
+    try:
+        # Per-call timeout: measured 30-42s across 4 test claims;
+        # 120s allows ~3x headroom. Vercel's default maxDuration of 60s
+        # is sufficient at this latency.
+        r = _client().post(
+            TRACE_CLAIM_HISTORY_URL,
+            json={"claim": claim},
+            timeout=120.0,  # measured 30-42s; 120s gives ~3x headroom
+        )
+        r.raise_for_status()
+        body = r.json()
+        if not include_passages:
+            body.pop("chronological_evidence", None)
+            body.pop("retrieved_passages_full", None)
+        return body
+    except httpx.TimeoutException:
+        return {"error": "trace-claim-history timed out (>120s). Try a more specific claim."}
+    except Exception as e:
+        return {"error": f"trace-claim-history failed: {e}"}
+
+
 # ---------- ASGI app (Vercel entry point) ----------
 
 app = mcp.streamable_http_app()
@@ -369,13 +389,6 @@ if REQUIRED_KEY:
 
 
 # ---------- TrustedHost middleware patch ----------
-#
-# FastMCP's streamable_http_app() installs starlette TrustedHostMiddleware
-# with localhost-only defaults, which is appropriate for stdio but
-# rejects every request when deployed behind a public hostname (Vercel,
-# Cloudflare etc) with a 421 "Invalid Host header". Vercel handles
-# routing/protection at the edge; trusting hosts at the app layer adds
-# no real security in this deployment. Strip it out.
 
 try:
     from starlette.middleware.trustedhost import TrustedHostMiddleware
@@ -383,7 +396,6 @@ try:
         m for m in app.user_middleware
         if getattr(m, "cls", None) is not TrustedHostMiddleware
     ]
-    # Force the middleware stack to be rebuilt on next request
     app.middleware_stack = None
 except Exception as _e:
     print(f"[startup] warning: could not patch TrustedHostMiddleware: {_e}", file=sys.stderr)
@@ -412,6 +424,8 @@ async def health(request):
         "supabase_url": SUPABASE_URL,
         "mcp_endpoint": "/mcp",
         "auth": "bearer_token" if REQUIRED_KEY else "open",
+        "tools_available": ["list_sources", "search_sources", "verify_quotation",
+                            "cite_passage", "source_status", "trace_claim_history"],
     })
 
 
