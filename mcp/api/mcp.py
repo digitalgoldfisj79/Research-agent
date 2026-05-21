@@ -5,15 +5,20 @@ This server is a thin proxy + verification layer over the Supabase-backed
 citation ledger. Sources live in Supabase, not in this deployment.
 
 Architecture:
-  - search_sources  → calls Supabase `search-passages` edge function
-                      (semantic search via gte-small embeddings)
-  - list_sources    → calls Supabase `get-sources` edge function
-  - cite_passage    → calls Supabase `get-passage` edge function
-  - source_status   → calls Supabase `get-sources` (single-source mode)
-  - verify_quotation→ fetches passages via `get-passage` then fuzzy-matches
-                      locally using rapidfuzz
-  - trace_claim_history → calls Supabase `trace-claim-history` edge function
-                      (LLM historiography with verification gate)
+  - search_sources         → calls Supabase `search-passages` edge function
+                             (now hybrid v3: vector + FTS via RRF, with
+                             recency bonus and refs_html penalty)
+  - list_sources           → calls Supabase `get-sources` edge function
+  - cite_passage           → calls Supabase `get-passage` edge function
+  - source_status          → calls Supabase `get-sources` (single-source mode)
+  - verify_quotation       → fetches passages via `get-passage` then fuzzy-matches
+                             locally using rapidfuzz
+  - trace_claim_history    → calls Supabase `trace-claim-history` edge function
+                             (LLM historiography with verification gate)
+  - ask_research_question  → calls Supabase `research` edge function
+                             (unified router: lookup/claim_history/qa with
+                             LLM query expansion, hybrid retrieval, synthesis,
+                             and recency awareness)
 
 The verification step deliberately runs server-side here so external
 clients can't bypass it. All Supabase edge functions called are
@@ -30,6 +35,7 @@ from urllib.parse import urlencode
 
 import httpx
 from rapidfuzz import fuzz
+
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 
@@ -40,10 +46,13 @@ SUPABASE_URL = os.environ.get(
     "SUPABASE_URL",
     "https://ymaqlcfjmdwncdbjprmw.supabase.co",
 )
-SEARCH_PASSAGES_URL = f"{SUPABASE_URL}/functions/v1/search-passages"
-GET_SOURCES_URL = f"{SUPABASE_URL}/functions/v1/get-sources"
-GET_PASSAGE_URL = f"{SUPABASE_URL}/functions/v1/get-passage"
+
+SEARCH_PASSAGES_URL     = f"{SUPABASE_URL}/functions/v1/search-passages"
+GET_SOURCES_URL         = f"{SUPABASE_URL}/functions/v1/get-sources"
+GET_PASSAGE_URL         = f"{SUPABASE_URL}/functions/v1/get-passage"
 TRACE_CLAIM_HISTORY_URL = f"{SUPABASE_URL}/functions/v1/trace-claim-history"
+RESEARCH_URL            = f"{SUPABASE_URL}/functions/v1/research"
+
 
 # Shared httpx client. Created lazily on first use to keep cold starts fast.
 _http: httpx.Client | None = None
@@ -86,7 +95,13 @@ def list_sources(limit: int = 50, offset: int = 0) -> dict:
 @mcp.tool()
 def search_sources(query: str, max_results: int = 5,
                    similarity_threshold: float = 0.5) -> list[dict]:
-    """Search the citation ledger for passages relevant to the query."""
+    """Search the citation ledger for passages relevant to the query.
+
+    Backed by Supabase `search-passages` v2 (hybrid retrieval via
+    `search_passages_hybrid_v3` RPC). Each result now includes
+    `passage_year` and `passage_author` when extractable, plus
+    `vector_rank` and `fts_rank_int` retrieval diagnostics.
+    """
     max_results = max(1, min(int(max_results), 20))
     if not (query or "").strip():
         return []
@@ -107,6 +122,10 @@ def search_sources(query: str, max_results: int = 5,
                 "paragraph_index": p["paragraph_index"],
                 "text": p["text"][:1000],
                 "similarity": round(float(p["similarity"]), 3),
+                "passage_year": p.get("passage_year"),
+                "passage_author": p.get("passage_author"),
+                "vector_rank": p.get("vector_rank"),
+                "fts_rank_int": p.get("fts_rank_int"),
             }
             for p in body.get("results", [])
         ]
@@ -194,7 +213,6 @@ def verify_quotation(quoted_text: str, source_id: str,
     best_para = None
     qlen = len(quoted)
     qlower = quoted.lower()
-
     for p in passages:
         text = p["text"]
         partial = fuzz.partial_ratio(qlower, text.lower())
@@ -210,12 +228,11 @@ def verify_quotation(quoted_text: str, source_id: str,
                 if s > local_best_score:
                     local_best_score = s
                     local_best_window = window
-                if local_best_score == 100:
-                    break
+                    if local_best_score == 100:
+                        break
             best_window = local_best_window
 
     final_score = best_score
-
     if final_score >= 95:
         return {
             "verified": True, "match_type": "fuzzy",
@@ -256,7 +273,6 @@ def cite_passage(source_id: str, paragraph_index: int = 0) -> dict:
     pas = passage_resp["passage"]
     title = src.get("title") or "(no title)"
     url = src.get("source_url") or ""
-
     citation = (
         f'"{title}". {url}. [source_id={source_id}, para={paragraph_index}]'
         if src.get("source_type") == "url_ingest"
@@ -285,7 +301,7 @@ def source_status(source_id: str) -> dict:
     return src
 
 
-# ---------- NEW: trace_claim_history ----------
+# ---------- trace_claim_history ----------
 
 @mcp.tool()
 def trace_claim_history(claim: str, include_passages: bool = False) -> dict:
@@ -306,39 +322,40 @@ def trace_claim_history(claim: str, include_passages: bool = False) -> dict:
     two LLM passes (classify + synthesise) plus the verification scan.
 
     Args:
-        claim: the claim to trace (min 8 characters). Best results for advocacy
-            claims about origin, authorship, dating, or interpretation.
-            Descriptive/empirical claims will produce earliest_advocacy=null
-            with a caveat.
-        include_passages: if True, include the full chronological_evidence
-            (50-item summary) and retrieved_passages_full (50 full passage
-            texts). Default False keeps the response compact (~10-20 KB).
-            Set True if you need to inspect specific passages cited.
+      claim: the claim to trace (min 8 characters). Best results for advocacy
+        claims about origin, authorship, dating, or interpretation.
+        Descriptive/empirical claims will produce earliest_advocacy=null
+        with a caveat.
+      include_passages: if True, include the full chronological_evidence
+        (50-item summary) and retrieved_passages_full (50 full passage
+        texts). Default False keeps the response compact (~10-20 KB).
+        Set True if you need to inspect specific passages cited.
 
     Returns dict with:
-        retrieval_summary: {total_retrieved, dated_count, undated_count, year_range}
-        historiography:
-            earliest_advocacy: {passage_year, author, verbatim_quote,
-                supporting_passage_index, source_id, caveat} | null
-            evolution_summary: prose tracing claim through time
-            current_status: {label, reasoning, modern_advocates[], modern_rejecters[]}
-                where label ∈ {currently_held, historically_proposed, contested,
-                abandoned, insufficient_corpus}
-            unresolved_historical_disputes: list of disagreements about what
-                historical figures believed
+      retrieval_summary: {total_retrieved, dated_count, undated_count, year_range}
+      historiography:
+        earliest_advocacy: {passage_year, author, verbatim_quote,
+                            supporting_passage_index, source_id, caveat} | null
+        evolution_summary: prose tracing claim through time
+        current_status: {label, reasoning, modern_advocates[], modern_rejecters[]}
+          where label ∈ {currently_held, historically_proposed, contested,
+                         abandoned, insufficient_corpus}
+        unresolved_historical_disputes: list of disagreements about what
+          historical figures believed
         integrated_narrative: 1-2 paragraphs of historiographic prose
-        verification:
-            unverified_assertions: list of LLM claims the gate couldn't confirm
-                (with field, status, value, supporting_passage_index)
-            flagged_specifics: years and percentages in narrative, each marked
-                verified_in_corpus or not_in_any_retrieved_passage
-            summary: counts by category
-            filtered_names: forum handles / emails the post-process dropped
-        usage: {total_tokens, retrieved}
+      verification:
+        unverified_assertions: list of LLM claims the gate couldn't confirm
+          (with field, status, value, supporting_passage_index)
+        flagged_specifics: years and percentages in narrative, each marked
+          verified_in_corpus or not_in_any_retrieved_passage
+        summary: counts by category
+        filtered_names: forum handles / emails the post-process dropped
+      usage: {total_tokens, retrieved}
     """
     claim = (claim or "").strip()
     if len(claim) < 8:
         return {"error": "claim required (min 8 chars)"}
+
     try:
         # Per-call timeout: measured 30-42s across 4 test claims;
         # 120s allows ~3x headroom. Vercel's default maxDuration of 60s
@@ -360,6 +377,92 @@ def trace_claim_history(claim: str, include_passages: bool = False) -> dict:
         return {"error": f"trace-claim-history failed: {e}"}
 
 
+# ---------- NEW: ask_research_question ----------
+
+@mcp.tool()
+def ask_research_question(query: str, mode_override: str | None = None) -> dict:
+    """Ask a research question about the Voynich Manuscript and get a synthesised,
+    cited answer drawn from the corpus of voynich.ninja forum threads, researcher
+    blogs (Pelling, O'Donovan), academic papers, and reference sites (voynich.nu).
+
+    USE THIS for complete research questions that benefit from a synthesised
+    answer with citations. Examples:
+      - "What is the recent LSA work by Davis and Layfield?"
+      - "Who first proposed the slot grammar?"
+      - "How has the forgery hypothesis evolved over time?"
+      - "What does the corpus say about the f116v marginalia?"
+
+    PREFER OTHER TOOLS when you need granular operations:
+      - search_sources: raw passage retrieval to inspect yourself
+      - verify_quotation: check whether a specific quote appears in a source
+      - cite_passage: fetch the full text of one specific paragraph
+      - trace_claim_history: chronological evolution of a tracked claim
+        (use the dedicated tool when the user explicitly asks for historiography
+         and the claim matches one of the tracked vocabulary entries)
+
+    The endpoint auto-routes to one of three internal modes:
+      - lookup: short noun-phrase queries -> direct passage list
+      - claim_history: queries matching tracked claim vocabulary -> trace
+      - qa: open-ended questions -> cited synthesised answer
+
+    Recency-aware: if the query mentions "recent", "latest", "this year",
+    "last week" etc., the synthesiser leads with the most recent dated
+    passage from the topic principal.
+
+    Args:
+      query: the research question (min 4 chars).
+      mode_override: optional, one of "lookup", "claim_history", "qa" to
+        force a specific routing decision. Default None lets the router
+        choose.
+
+    Returns the full /research envelope. Most useful fields:
+      - mode: which routing mode was selected
+      - payload.answer: the synthesised text answer (for qa mode)
+      - payload.summary: one-sentence summary (for qa mode)
+      - payload.citations: array of {source_id, paragraph_index, passage_year,
+        passage_author, snippet, rrf_score}
+      - payload.recency_intent: true if recency detection fired
+      - total_elapsed_ms: end-to-end latency
+
+    Latency: typically 12-25 seconds, up to 60 seconds under heavy load.
+    """
+    query = (query or "").strip()
+    if len(query) < 4:
+        return {"error": "query required (min 4 chars)"}
+
+    body: dict = {"query": query}
+    if mode_override in ("lookup", "claim_history", "qa"):
+        body["mode_override"] = mode_override
+
+    try:
+        # /research has an internal 85s deadline; 90s here gives a small
+        # transport-overhead buffer without exceeding Vercel maxDuration: 60.
+        # Note: if Vercel maxDuration ever needs to accommodate this fully,
+        # bump vercel.json to maxDuration: 90.
+        r = _client().post(
+            RESEARCH_URL,
+            json=body,
+            timeout=90.0,
+        )
+        r.raise_for_status()
+        return r.json()
+    except httpx.TimeoutException:
+        return {
+            "error": "research endpoint timed out (>90s). Try a more specific query or check Supabase status."
+        }
+    except httpx.HTTPStatusError as e:
+        try:
+            detail = e.response.json()
+        except Exception:
+            detail = e.response.text[:500]
+        return {
+            "error": f"research endpoint HTTP {e.response.status_code}",
+            "detail": detail,
+        }
+    except Exception as e:
+        return {"error": f"research endpoint failed: {e}"}
+
+
 # ---------- ASGI app (Vercel entry point) ----------
 
 app = mcp.streamable_http_app()
@@ -368,7 +471,6 @@ app = mcp.streamable_http_app()
 # ---------- Optional API key gate ----------
 
 REQUIRED_KEY = os.environ.get("CITATION_MCP_API_KEY")
-
 if REQUIRED_KEY:
     from starlette.middleware.base import BaseHTTPMiddleware
     from starlette.responses import JSONResponse
@@ -415,7 +517,6 @@ async def health(request):
             sources_count = r.json().get("count", "unknown")
     except Exception:
         sources_count = "supabase-unreachable"
-
     return JSONResponse({
         "service": "citation-verifier-mcp",
         "status": "ok",
@@ -425,7 +526,8 @@ async def health(request):
         "mcp_endpoint": "/mcp",
         "auth": "bearer_token" if REQUIRED_KEY else "open",
         "tools_available": ["list_sources", "search_sources", "verify_quotation",
-                            "cite_passage", "source_status", "trace_claim_history"],
+                            "cite_passage", "source_status", "trace_claim_history",
+                            "ask_research_question"],
     })
 
 
