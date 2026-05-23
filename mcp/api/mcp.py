@@ -52,6 +52,7 @@ GET_SOURCES_URL         = f"{SUPABASE_URL}/functions/v1/get-sources"
 GET_PASSAGE_URL         = f"{SUPABASE_URL}/functions/v1/get-passage"
 TRACE_CLAIM_HISTORY_URL = f"{SUPABASE_URL}/functions/v1/trace-claim-history"
 RESEARCH_URL            = f"{SUPABASE_URL}/functions/v1/research"
+GRAPH_QUERY_URL         = f"{SUPABASE_URL}/functions/v1/graph-query"
 
 
 # Shared httpx client. Created lazily on first use to keep cold starts fast.
@@ -463,6 +464,176 @@ def ask_research_question(query: str, mode_override: str | None = None) -> dict:
         return {"error": f"research endpoint failed: {e}"}
 
 
+
+
+# ---------- graph-query tools (structural analysis of the citation graph) ----------
+#
+# These four tools expose the underlying claim/edge/passage graph for analytic
+# queries — different in shape from search_sources (retrieval) and
+# ask_research_question (synthesis). All call a single read-only Supabase edge
+# function (graph-query) that routes by action.
+
+
+def _graph_query(action: str, **kwargs) -> dict:
+    """Internal helper. POSTs to graph-query edge function with given action+params."""
+    try:
+        body = {"action": action, **{k: v for k, v in kwargs.items() if v is not None}}
+        r = _client().post(GRAPH_QUERY_URL, json=body, timeout=30.0)
+        r.raise_for_status()
+        return r.json()
+    except httpx.HTTPStatusError as e:
+        try:
+            detail = e.response.json()
+        except Exception:
+            detail = e.response.text[:500]
+        return {"error": f"graph-query HTTP {e.response.status_code}", "detail": detail}
+    except Exception as e:
+        return {"error": f"graph-query failed: {e}"}
+
+
+@mcp.tool()
+def list_claims() -> dict:
+    """List all hypotheses tracked in the citation graph's claim vocabulary.
+
+    Each claim has: claim_id, display_name, description, example_phrasings
+    (alternative wordings the extractor recognises), related_claim_ids
+    (cross-references), and edge_count (how many passages have been
+    stance-classified against this claim across the corpus).
+
+    Use this to discover what hypotheses the graph currently tracks before
+    using query_edges or author_cooccurrence to drill in.
+    """
+    return _graph_query("list_claims")
+
+
+@mcp.tool()
+def query_edges(
+    claim_id: str | None = None,
+    source_id: str | None = None,
+    passage_author_id: str | None = None,
+    nested_author_id: str | None = None,
+    stance: str | None = None,
+    min_confidence: float | None = None,
+    year_min: int | None = None,
+    year_max: int | None = None,
+    extraction_version: str | None = None,
+    include_text: bool = False,
+    limit: int = 50,
+    offset: int = 0,
+) -> dict:
+    """Filter the passage_claim_edges graph by structural criteria.
+
+    Each edge is a single passage's stance on a single tracked claim with a
+    confidence score and optional nested attribution (cited authority).
+
+    Args:
+      claim_id: restrict to one claim (e.g. "forgery_hypothesis"). Use
+        list_claims to discover valid ids.
+      source_id: restrict to one source's passages.
+      passage_author_id: restrict to edges where the passage author has this id
+        (resolved via author_aliases).
+      nested_author_id: restrict to edges where the cited/attributed authority
+        has this id.
+      stance: one of "advocates", "rejects", "discusses", "context".
+      min_confidence: float 0-1. The extractor's confidence in the stance label.
+      year_min, year_max: filter on nested_attribution_year (the year the cited
+        authority took their position, NOT the year of the passage).
+      extraction_version: "v0" (May 2026 baseline) or "v1" (current).
+      include_text: if True, joins the passage text (trimmed to 400 chars).
+        Default False to keep payloads small.
+      limit, offset: pagination. Max limit 500.
+
+    Returns the matching edges plus total count for the filter combination.
+    """
+    return _graph_query(
+        "query_edges",
+        claim_id=claim_id, source_id=source_id,
+        passage_author_id=passage_author_id, nested_author_id=nested_author_id,
+        stance=stance, min_confidence=min_confidence,
+        year_min=year_min, year_max=year_max,
+        extraction_version=extraction_version,
+        include_text=include_text, limit=limit, offset=offset,
+    )
+
+
+@mcp.tool()
+def author_cooccurrence(
+    seed_claim_id: str | None = None,
+    seed_author_id: str | None = None,
+    co_with: str = "author",
+    min_stance: str | None = None,
+    limit: int = 20,
+) -> dict:
+    """Find entities that co-occur with a seed in the edge graph.
+
+    For "who weighs in on hypothesis X", pass seed_claim_id=X co_with="author"
+    and you get authors ranked by edge count, each with a stance distribution.
+
+    For "what hypotheses does author Y engage with", pass seed_author_id=Y
+    co_with="claim" and you get the claim ids they've taken positions on.
+
+    For "what sources cite hypothesis X", pass seed_claim_id=X co_with="source"
+    and you get sources ranked by edge count.
+
+    Args:
+      seed_claim_id: a claim_id to anchor the query (required if no author).
+      seed_author_id: an author_id to anchor the query (required if no claim).
+      co_with: what to group results by — "author" | "claim" | "source".
+      min_stance: optional filter — only count edges with this stance.
+      limit: max results (default 20, max 200).
+
+    Each result row has: entity_id, edge_count (how many edges link the entity
+    to the seed), distinct_passages (number of distinct passages), and stances
+    (JSON breakdown {stance: count, ...} showing how the entity's edges break
+    down by stance).
+    """
+    return _graph_query(
+        "author_cooccurrence",
+        seed_claim_id=seed_claim_id, seed_author_id=seed_author_id,
+        co_with=co_with, min_stance=min_stance, limit=limit,
+    )
+
+
+@mcp.tool()
+def find_convergence(
+    seed_source_id: str,
+    seed_paragraph_index: int,
+    min_similarity: float = 0.85,
+    limit: int = 10,
+    cross_source_only: bool = True,
+    cross_author_only: bool = False,
+) -> dict:
+    """Find passages with high semantic similarity to a seed passage, restricted
+    to DIFFERENT sources (or different authors). Use this to surface independent
+    corroborations of a claim or observation.
+
+    Backed by pgvector cosine similarity over the 384-dim passage embeddings,
+    using the HNSW index for fast lookup.
+
+    Args:
+      seed_source_id, seed_paragraph_index: the seed passage to find
+        corroborations for.
+      min_similarity: 0-1 cosine similarity threshold. 0.85 is restrictive
+        (near-duplicate); 0.70 is loose (same topic, different angle); 0.55
+        is very loose (related discussion).
+      limit: max results (default 10, max 50).
+      cross_source_only: if True (default), exclude same-source matches —
+        guarantees the corroboration is from a different document.
+      cross_author_only: if True, additionally exclude same-passage-author
+        matches. Use when you want to be sure two HUMANS converged, not
+        the same person across multiple posts.
+
+    Returns up to `limit` candidates each with: source_id, paragraph_index,
+    similarity, passage_year, passage_author, text_snippet (first 400 chars).
+    """
+    return _graph_query(
+        "find_convergence",
+        seed_source_id=seed_source_id, seed_paragraph_index=seed_paragraph_index,
+        min_similarity=min_similarity, limit=limit,
+        cross_source_only=cross_source_only, cross_author_only=cross_author_only,
+    )
+
+
 # ---------- ASGI app (Vercel entry point) ----------
 
 app = mcp.streamable_http_app()
@@ -527,7 +698,9 @@ async def health(request):
         "auth": "bearer_token" if REQUIRED_KEY else "open",
         "tools_available": ["list_sources", "search_sources", "verify_quotation",
                             "cite_passage", "source_status", "trace_claim_history",
-                            "ask_research_question"],
+                            "ask_research_question",
+                            "list_claims", "query_edges", "author_cooccurrence",
+                            "find_convergence"],
     })
 
 
