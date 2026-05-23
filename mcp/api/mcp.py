@@ -674,6 +674,113 @@ except Exception as _e:
     print(f"[startup] warning: could not patch TrustedHostMiddleware: {_e}", file=sys.stderr)
 
 
+
+
+# ---------- REST shim (HTTP-callable wrappers around the MCP tools) ----------
+#
+# Provides plain HTTP endpoints so clients without MCP JSON-RPC support
+# (ChatGPT browsing, simple curl, Lovable apps, etc.) can invoke each tool.
+#
+# Pattern:
+#   POST /api/v1/{tool_name}        body: JSON object of named arguments
+#   GET  /api/v1/tools              returns the tool index + parameter schema
+#
+# Empty body == call with all defaults. Unknown parameters return 400 with
+# the valid parameter list so callers can self-correct.
+
+import inspect
+from starlette.routing import Route as _Route
+from starlette.responses import JSONResponse as _JSONResponse
+
+
+_REST_TOOLS = {
+    "list_sources":         list_sources,
+    "search_sources":       search_sources,
+    "verify_quotation":     verify_quotation,
+    "cite_passage":         cite_passage,
+    "source_status":        source_status,
+    "trace_claim_history":  trace_claim_history,
+    "ask_research_question": ask_research_question,
+    "list_claims":          list_claims,
+    "query_edges":          query_edges,
+    "author_cooccurrence":  author_cooccurrence,
+    "find_convergence":     find_convergence,
+}
+
+
+async def rest_tool_invoke(request):
+    tool_name = request.path_params["tool_name"]
+    fn = _REST_TOOLS.get(tool_name)
+    if fn is None:
+        return _JSONResponse(
+            {"error": f"unknown tool: {tool_name}",
+             "available_tools": sorted(_REST_TOOLS.keys())},
+            status_code=404,
+        )
+
+    body_bytes = await request.body()
+    if body_bytes:
+        try:
+            kwargs = json.loads(body_bytes)
+        except json.JSONDecodeError as e:
+            return _JSONResponse({"error": f"invalid JSON body: {e}"}, status_code=400)
+        if not isinstance(kwargs, dict):
+            return _JSONResponse({"error": "request body must be a JSON object"}, status_code=400)
+    else:
+        kwargs = {}
+
+    sig = inspect.signature(fn)
+    valid_params = set(sig.parameters.keys())
+    unknown = set(kwargs.keys()) - valid_params
+    if unknown:
+        return _JSONResponse(
+            {"error": f"unknown parameters: {sorted(unknown)}",
+             "valid_parameters": sorted(valid_params)},
+            status_code=400,
+        )
+
+    try:
+        result = fn(**kwargs)
+    except TypeError as e:
+        return _JSONResponse({"error": f"bad arguments: {e}"}, status_code=400)
+    except Exception as e:
+        return _JSONResponse({"error": f"tool failed: {e}"}, status_code=500)
+
+    return _JSONResponse(result)
+
+
+async def rest_tools_list(request):
+    """List all available REST-callable tools with their signatures."""
+    out = {}
+    for name, fn in _REST_TOOLS.items():
+        sig = inspect.signature(fn)
+        params = {}
+        for pname, p in sig.parameters.items():
+            ann = str(p.annotation).replace("typing.", "") if p.annotation != inspect.Parameter.empty else "any"
+            default = None if p.default == inspect.Parameter.empty else p.default
+            required = p.default == inspect.Parameter.empty
+            try:
+                json.dumps(default)
+            except (TypeError, ValueError):
+                default = str(default)
+            params[pname] = {"type": ann, "default": default, "required": required}
+        doc = (fn.__doc__ or "").strip()
+        out[name] = {
+            "summary": doc.split("\n\n")[0] if doc else "",
+            "parameters": params,
+            "endpoint": f"POST /api/v1/{name}",
+        }
+    return _JSONResponse({
+        "service": "citation-verifier-mcp REST shim",
+        "tool_count": len(out),
+        "tools": out,
+    })
+
+
+app.routes.insert(0, _Route("/api/v1/tools",       rest_tools_list,  methods=["GET"]))
+app.routes.insert(0, _Route("/api/v1/{tool_name}", rest_tool_invoke, methods=["POST"]))
+
+
 # ---------- Health check ----------
 
 from starlette.responses import JSONResponse
@@ -701,6 +808,11 @@ async def health(request):
                             "ask_research_question",
                             "list_claims", "query_edges", "author_cooccurrence",
                             "find_convergence"],
+        "rest_shim": {
+            "tool_invoke":   "POST /api/v1/{tool_name}  (JSON body of named arguments)",
+            "tool_index":    "GET  /api/v1/tools",
+            "purpose":       "for clients without MCP JSON-RPC support (e.g. ChatGPT browsing)",
+        },
     })
 
 
