@@ -25,7 +25,7 @@ concurrency:
   cancel-in-progress: false  # let an overlapping run finish rather than killing it
 
 jobs:
-  warm:
+  warm: 
     runs-on: ubuntu-latest
     timeout-minutes: 2
     steps:
