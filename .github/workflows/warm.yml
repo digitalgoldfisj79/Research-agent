@@ -1,0 +1,63 @@
+name: warm-research
+
+# Pings /research every 5 min with a short noun-phrase query so it routes to
+# `lookup` mode (no LLM call, logged at $0.00 cost). The point is NOT the
+# answer — it's to keep the Supabase edge container warm and the gte-small
+# classifier session loaded, so real user queries don't pay the ~18s cold-start
+# we measured.
+#
+# Required secret:
+#   SUPABASE_PROJECT_REF   (e.g. ymaqlcfjmdwncdbjprmw)
+#
+# Distinct from heartbeat.yml:
+#   heartbeat.yml = daily, anti-pause for the Supabase free-tier
+#   warm.yml      = every 5 min, cold-start mitigation for /research
+#
+# Reversibility: delete this file, or disable in the Actions tab.
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'   # every 5 minutes (best-effort; GH may delay 5-15 min under load)
+  workflow_dispatch:        # manual trigger button — use this once to verify before relying on the schedule
+
+concurrency:
+  group: warm-research
+  cancel-in-progress: false  # let an overlapping run finish rather than killing it
+
+jobs:
+  warm:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Warm /research via lookup-mode ping
+        env:
+          REF: ${{ secrets.SUPABASE_PROJECT_REF }}
+        run: |
+          set -u
+          if [ -z "${REF}" ]; then
+            echo "::error::SUPABASE_PROJECT_REF secret is not set"; exit 1
+          fi
+          URL="https://${REF}.supabase.co/functions/v1/research"
+          # Short noun-phrase query routes to lookup (no LLM, $0). mode_override
+          # is set as a belt-and-braces guard in case the router heuristic changes.
+          BODY='{"query":"Voynich manuscript","mode_override":"lookup"}'
+          # -m 60: hard 60s ceiling (cold path measured ~31s; warm ~3-5s for lookup)
+          # -w writes a one-line latency summary regardless of body content
+          # -o /dev/null discards body — we only care that it returned 2xx
+          # We do NOT use -f: a 429/503 budget-gate response is still a successful
+          # warm (the container is up); we just log status without failing the job.
+          http_status=$(
+            curl -sS -m 60 -o /dev/null \
+                 -w '%{http_code}' \
+                 -X POST "${URL}" \
+                 -H 'Content-Type: application/json' \
+                 -H 'User-Agent: gh-actions-warm/1.0' \
+                 -d "${BODY}"
+          )
+          echo "warm ping -> HTTP ${http_status}"
+          # Exit non-zero only on transport-level failure (000) or 5xx that isn't 503-budget.
+          case "${http_status}" in
+            2*|429|503) exit 0 ;;
+            000)        echo "::error::transport failure (timeout/DNS)"; exit 1 ;;
+            *)          echo "::warning::unexpected status ${http_status} (not failing job)"; exit 0 ;;
+          esac
