@@ -40,7 +40,7 @@ jobs:
           URL="https://${REF}.supabase.co/functions/v1/research"
           # Short noun-phrase query routes to lookup (no LLM, $0). mode_override
           # is set as a belt-and-braces guard in case the router heuristic changes.
-          BODY='{"query":"Voynich manuscript","mode_override":"lookup"}'
+          BODY='{"query":"Voynich manuscript"}'
           # -m 60: hard 60s ceiling (cold path measured ~31s; warm ~3-5s for lookup)
           # -w writes a one-line latency summary regardless of body content
           # -o /dev/null discards body — we only care that it returned 2xx
