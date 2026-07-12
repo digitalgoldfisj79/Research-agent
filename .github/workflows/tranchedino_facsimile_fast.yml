@@ -1,0 +1,37 @@
+name: Build Tranchedino facsimile bundle
+
+on:
+  pull_request:
+    branches:
+      - chatgpt/onedrive-cipher-inventory-20260712
+
+permissions:
+  contents: read
+
+jobs:
+  facsimile:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Check out branch
+        uses: actions/checkout@v4
+
+      - name: Install Python dependencies
+        run: python -m pip install requests pymupdf pillow
+
+      - name: Export source and facsimiles
+        env:
+          OUT_DIR: tranchedino_facsimile_output
+        run: python tools/package_tranchedino_facsimile.py
+
+      - name: Package output
+        run: zip -r -0 tranchedino_facsimile_bundle.zip tranchedino_facsimile_output
+
+      - name: Upload facsimile artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: tranchedino-facsimile-bundle
+          path: tranchedino_facsimile_bundle.zip
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
