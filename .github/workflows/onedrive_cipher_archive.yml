@@ -1,12 +1,9 @@
 name: Capture OneDrive cipher archive
 
 on:
-  push:
-    branches:
-      - chatgpt/onedrive-cipher-inventory-20260712
   pull_request:
     branches:
-      - main
+      - chatgpt/onedrive-cipher-inventory-20260712
 
 permissions:
   contents: read
