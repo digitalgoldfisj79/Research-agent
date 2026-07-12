@@ -1,4 +1,4 @@
-name: Capture OneDrive cipher archive
+name: Build Tranchedino cipher catalogue
 
 on:
   pull_request:
@@ -9,27 +9,34 @@ permissions:
   contents: read
 
 jobs:
-  capture:
+  catalogue:
     runs-on: ubuntu-latest
     timeout-minutes: 360
     steps:
       - name: Check out branch
         uses: actions/checkout@v4
 
-      - name: Capture public OneDrive archive
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y tesseract-ocr tesseract-ocr-ita tesseract-ocr-eng
+
+      - name: Install Python dependencies
+        run: python -m pip install requests pymupdf pillow opencv-python-headless numpy
+
+      - name: Build catalogue and facsimile bundle
         env:
-          SHARE_URL: https://1drv.ms/f/c/7c44d2c377e3228b/IgCLIuN3w9JEIIB8hhAAAAAAASAgV0uMkEZqjG8SYx083RU?e=tn9rdL
-          OUT_DIR: capture
-        run: python3 tools/fetch_onedrive_archive.py
+          OUT_DIR: tranchedino_output
+        run: python tools/catalogue_tranchedino.py
 
-      - name: Package capture
-        run: zip -r -0 onedrive_cipher_archive_capture.zip capture
+      - name: Package output
+        run: zip -r -0 tranchedino_cipher_catalogue_bundle.zip tranchedino_output
 
-      - name: Upload capture artifact
+      - name: Upload catalogue artifact
         uses: actions/upload-artifact@v4
         with:
-          name: onedrive-cipher-archive-capture
-          path: onedrive_cipher_archive_capture.zip
+          name: tranchedino-cipher-catalogue
+          path: tranchedino_cipher_catalogue_bundle.zip
           if-no-files-found: error
-          retention-days: 1
+          retention-days: 7
           compression-level: 0
