@@ -1,0 +1,38 @@
+name: Capture OneDrive cipher archive
+
+on:
+  push:
+    branches:
+      - chatgpt/onedrive-cipher-inventory-20260712
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  capture:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - name: Check out branch
+        uses: actions/checkout@v4
+
+      - name: Capture public OneDrive archive
+        env:
+          SHARE_URL: https://1drv.ms/f/c/7c44d2c377e3228b/IgCLIuN3w9JEIIB8hhAAAAAAASAgV0uMkEZqjG8SYx083RU?e=tn9rdL
+          OUT_DIR: capture
+        run: python3 tools/fetch_onedrive_archive.py
+
+      - name: Package capture
+        run: zip -r -0 onedrive_cipher_archive_capture.zip capture
+
+      - name: Upload capture artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: onedrive-cipher-archive-capture
+          path: onedrive_cipher_archive_capture.zip
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
