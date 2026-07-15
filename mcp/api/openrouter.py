@@ -60,6 +60,7 @@ def _configured() -> tuple[bool, str | None]:
 
 mcp = FastMCP(
     "openrouter-private",
+    streamable_http_path="/openrouter-mcp",
     transport_security=TransportSecuritySettings(
         enable_dns_rebinding_protection=False,
     ),
